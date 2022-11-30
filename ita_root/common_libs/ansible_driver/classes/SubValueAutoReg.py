@@ -15,21 +15,15 @@
 代入値自動登録とパラメータシートを抜くmodule
 """
 
-import json
 import os
-import subprocess
 import inspect
 import hashlib
-import re
 
 from flask import g
-from pathlib import Path
-from pprint import pprint
 
-from common_libs.common import *
-from common_libs.loadtable import *
-from common_libs.common.exception import *
-from .AnsibleMakeMessage import AnsibleMakeMessage
+from common_libs.common import *  # noqa F403
+from common_libs.loadtable import *  # noqa F403
+from common_libs.common.exception import *  # noqa F403
 from .AnscConstClass import AnscConst
 from .WrappedStringReplaceAdmin import WrappedStringReplaceAdmin
 
@@ -84,12 +78,13 @@ arrayValueTmplOfPhoLnk = {
     "LAST_UPDATE_USER": ""
 }
 
+
 class SubValueAutoReg():
     """
     代入値自動登録とパラメータシートを抜くclass
     """
 
-    def GetDataFromParameterSheet(self, exec_type, operation_id="", movement_id="", execution_no="", WS_DB=None):
+    def get_data_from_parameter_sheet(self, operation_id="", movement_id="", execution_no="", WS_DB=None):
         """
         代入値自動登録とパラメータシートを抜く
         """
@@ -114,7 +109,7 @@ class SubValueAutoReg():
         frame = inspect.currentframe().f_back
         g.applogger.debug(os.path.basename(__file__) + str(frame.f_lineno) + traceMsg)
 
-        ret = self.readValAssign(movement_id, WS_DB)
+        ret = self.read_val_assign(WS_DB, movement_id)
 
         if ret[0] == 0:
             error_flag = 1
@@ -140,24 +135,6 @@ class SubValueAutoReg():
         lv_varsAssList = ret[0]
         lv_arrayVarsAssList = ret[1]
         warning_flag = ret[2]
-
-        # 処理区分が変数抜出処理
-        if exec_type == '2':
-
-            template_list = {} # { MovementID: { TPF変数名: 0 }, … }
-            host_list = {} # { MovementID: { OPERATION_ID: { SYSTEM_ID: 0 }, … }, … }
-
-            var_extractor = WrappedStringReplaceAdmin()
-
-            # 一般変数・複数具体値変数を紐付けている紐付メニューの具体値からTPF変数を抽出する
-            for varsAssRecord in lv_varsAssList.values():
-                template_list, host_list = self.extract_tpl_vars(var_extractor, varsAssRecord, template_list, host_list)
-
-            # 多次元変数を紐付けている紐付メニューの具体値からTPF変数を抽出する
-            for varsAssRecord in lv_arrayVarsAssList.values():
-                template_list, host_list = self.extract_tpl_vars(var_extractor, varsAssRecord, template_list, host_list)
-
-            return True, template_list, host_list
 
         # トランザクション開始
         traceMsg = g.appmsg.get_api_message("MSG-10785")
@@ -246,11 +223,6 @@ class SubValueAutoReg():
 
         WS_DB.db_transaction_start()
 
-        # 対象ホスト管理のデータを全件読込
-        lv_PhoLinkRecodes = {}
-        ret = self.getPhoLinkRecodes(WS_DB)
-        lv_PhoLinkRecodes = ret[1]
-
         # 代入値管理で登録したオペ+作業パターン+ホストが作業対象ホストに登録されているか判定し、未登録の場合は登録する
         # トレースメッセージ
         traceMsg = g.appmsg.get_api_message("MSG-10810")
@@ -261,21 +233,86 @@ class SubValueAutoReg():
             for ptn_id, host_list in ptn_list.items():
                 for host_id, access_auth in host_list.items():
                     lv_phoLinkData = {'OPERATION_ID': ope_id, 'MOVEMENT_ID': ptn_id, 'SYSTEM_ID': host_id}
-                    ret = self.addStg1PhoLink(lv_phoLinkData, lv_PhoLinkRecodes, execution_no, WS_DB)
-                    lv_PhoLinkRecodes = ret[1]
+                    ret = self.addStg1PhoLink(lv_phoLinkData, execution_no, WS_DB)
 
-                    if ret[0] == 0:
+                    if ret == 0:
                         error_flag = 1
                         raise ValidationException("MSG-10373")
 
         del lv_phoLinkList
-        del lv_PhoLinkRecodes
 
         # コミット(レコードロックを解除)
         # トランザクション終了
         WS_DB.db_transaction_end(True)
 
         return True
+
+    def get_data_from_all_parameter_sheet(self, WS_DB=None):
+        """
+        代入値自動登録とパラメータシートを抜く
+        """
+
+        global g_null_data_handling_def
+        global warning_flag
+        global error_flag
+
+        # インターフェース情報からNULLデータを代入値管理に登録するかのデフォルト値を取得する。
+        ret = self.getIFInfoDB(WS_DB)
+
+        if ret[0] == 0:
+            error_flag = 1
+            raise ValidationException(ret[2])
+
+        lv_if_info = ret[1]
+        g_null_data_handling_def = lv_if_info["NULL_DATA_HANDLING_FLG"]
+
+        # 代入値自動登録設定からカラム毎の変数の情報を取得
+        # トレースメッセージ
+        traceMsg = g.appmsg.get_api_message("MSG-10804")
+        frame = inspect.currentframe().f_back
+        g.applogger.debug(os.path.basename(__file__) + str(frame.f_lineno) + traceMsg)
+
+        ret = self.read_val_assign(WS_DB)
+
+        if ret[0] == 0:
+            error_flag = 1
+            raise ValidationException("MSG-10353")
+
+        lv_tableNameToMenuIdList = ret[1]
+        lv_tabColNameToValAssRowList = ret[2]
+        lv_tableNameToPKeyNameList = ret[3]
+        lv_tableNameToMenuNameRestList = ret[4]
+
+        # 紐付メニューへのSELECT文を生成する。
+        ret = self.createQuerySelectCMDB(lv_tableNameToMenuIdList, lv_tabColNameToValAssRowList, lv_tableNameToPKeyNameList)
+        # 代入値紐付メニュー毎のSELECT文配列
+        lv_tableNameToSqlList = ret
+
+        # 紐付メニューから具体値を取得する。
+        traceMsg = g.appmsg.get_api_message("MSG-10805")
+        frame = inspect.currentframe().f_back
+        g.applogger.debug(os.path.basename(__file__) + str(frame.f_lineno) + traceMsg)
+
+        warning_flag = 0
+        ret = self.getCMDBdata(lv_tableNameToSqlList, lv_tableNameToMenuIdList, lv_tabColNameToValAssRowList, lv_tableNameToMenuNameRestList, None, warning_flag, WS_DB)
+        lv_varsAssList = ret[0]
+        lv_arrayVarsAssList = ret[1]
+        warning_flag = ret[2]
+
+        template_list = {}  # { MovementID: { TPF変数名: 0 }, … }
+        host_list = {}  # { MovementID: { OPERATION_ID: { SYSTEM_ID: 0 }, … }, … }
+
+        var_extractor = WrappedStringReplaceAdmin()
+
+        # 一般変数・複数具体値変数を紐付けている紐付メニューの具体値からTPF変数を抽出する
+        for varsAssRecord in lv_varsAssList.values():
+            template_list, host_list = self.extract_tpl_vars(var_extractor, varsAssRecord, template_list, host_list)
+
+        # 多次元変数を紐付けている紐付メニューの具体値からTPF変数を抽出する
+        for varsAssRecord in lv_arrayVarsAssList.values():
+            template_list, host_list = self.extract_tpl_vars(var_extractor, varsAssRecord, template_list, host_list)
+
+        return True, template_list, host_list
 
     def getAnsible_RolePackage_file(self, in_dir, in_pkey, in_filename):
         intNumPadding = 10
@@ -284,45 +321,16 @@ class SubValueAutoReg():
         file = in_dir + '/' + in_pkey.rjust(intNumPadding, '0') + '/' + in_filename
         return file
 
-    def getPhoLinkRecodes(self, WS_DB):
-        """
-        作業対象ホストの全データ読込
-
-        Arguments:
-            WS_DB: WorkspaceDBインスタンス
-
-        Returns:
-            is success:(bool)
-            in_PhoLinkRecodes: 作業対象ホストの全データ配列
-        """
-        in_PhoLinkRecodes = {}
-
-        where = "WHERE PHO_LINK_ID <> '0'"
-        WS_DB.table_lock(["T_ANSR_TGT_HOST"])
-        data_list = WS_DB.table_select("T_ANSR_TGT_HOST", where)
-
-        for row in data_list:
-            key = row["OPERATION_ID"] + "_"
-            key += row["MOVEMENT_ID"] + "_"
-            key += row["SYSTEM_ID"] + "_"
-            key += row["DISUSE_FLAG"]
-
-            in_PhoLinkRecodes[key] = row
-
-        return True, in_PhoLinkRecodes
-
-    def addStg1PhoLink(self, in_phoLinkData, in_PhoLinkRecodes, execution_no, WS_DB):
+    def addStg1PhoLink(self, in_phoLinkData, execution_no, WS_DB):
         """
         作業対象ホストの廃止レコードを復活または新規レコード追加
 
         Arguments:
             in_phoLinkData: 作業対象ホスト更新情報配列
-            in_PhoLinkRecodes: 作業対象ホストの全データ配列
             WS_DB: WorkspaceDBインスタンス
 
         Returns:
             is success:(bool)
-            in_PhoLinkRecodes: 作業対象ホストの全データ配列
         """
         global strCurTablePhoLnk
         global strJnlTablePhoLnk
@@ -378,7 +386,7 @@ class SubValueAutoReg():
         if result is False:
             raise AppException("499-00701", [retAry], [retAry])
 
-        return True, in_PhoLinkRecodes
+        return True
 
     def createQuerySelectCMDB(self, in_tableNameToMenuIdList, in_tabColNameToValAssRowList, in_tableNameToPKeyNameList):
         """
@@ -444,7 +452,6 @@ class SubValueAutoReg():
             make_sql += col_sql + " \n "
             make_sql += " FROM `" + table_name + "` TBL_A \n "
             make_sql += " WHERE DISUSE_FLAG = '0' \n "
-            make_sql += " AND OPERATION_ID = %s \n "
 
             # メニューテーブルのSELECT SQL文退避
             inout_tableNameToSqlList[table_name] = make_sql
@@ -859,18 +866,19 @@ class SubValueAutoReg():
         ina_vars_ass_list = {}
         ina_array_vars_ass_list = {}
 
-        continue_flg = 0
         idx = 0
         for table_name, sql in in_tableNameToSqlList.items():
-            if continue_flg == 1:
-                continue
 
             # トレースメッセージ
             traceMsg = g.appmsg.get_api_message("MSG-10806", [in_tableNameToMenuIdList[table_name]])
             frame = inspect.currentframe().f_back
             g.applogger.debug(os.path.basename(__file__) + str(frame.f_lineno) + traceMsg)
 
-            data_list = WS_DB.sql_execute(sql, [AnscConst.DF_ITA_LOCAL_HOST_CNT, AnscConst.DF_ITA_LOCAL_PKEY, operation_id])
+            if operation_id is not None:
+                sql += " AND OPERATION_ID = %s \n "
+                data_list = WS_DB.sql_execute(sql, [AnscConst.DF_ITA_LOCAL_HOST_CNT, AnscConst.DF_ITA_LOCAL_PKEY, operation_id])
+            else:
+                data_list = WS_DB.sql_execute(sql, [AnscConst.DF_ITA_LOCAL_HOST_CNT, AnscConst.DF_ITA_LOCAL_PKEY])
 
             # FETCH行数を取得
             if len(data_list) == 0:
@@ -918,16 +926,10 @@ class SubValueAutoReg():
                 host_id = row['HOST_ID']
 
                 # 代入値自動登録設定に登録されている変数に対応する具体値を取得する
-                for col_name, col_val in row.items():
-                    # パラメータシート側の項番取得
-                    if AnscConst.DF_ITA_LOCAL_PKEY == col_name:
-                        col_row_id = col_val
+                # パラメータシート側の項番取得
+                col_row_id = row['__ITA_LOCAL_COLUMN_4__']
 
-                # 具体値カラム以外を除外
-                search_list = [AnscConst.DF_ITA_LOCAL_OPERATION_CNT, AnscConst.DF_ITA_LOCAL_HOST_CNT, AnscConst.DF_ITA_LOCAL_DUP_CHECK_ITEM, "OPERATION_ID", "HOST_ID", AnscConst.DF_ITA_LOCAL_PKEY]
-                if col_name in search_list:
-                    continue_flg = 1
-                    continue
+                col_name = 'DATA_JSON'  # 2系からデータの持ち方変わった
 
                 # 再度カラムをチェック
                 if table_name in in_tabColNameToValAssRowList:
@@ -988,13 +990,13 @@ class SubValueAutoReg():
                                 for ope_data in ope_data_list:
                                     ope_name = ope_data['OPERATION_NAME']
                                 mode = "inner"
-                                filter_parameter = {"host_name": {"LIST": [host_name]}, "operation_name_disp": {"LIST": [ope_name]},"discard": {"LIST": ["0"]}}
+                                filter_parameter = {"host_name": {"LIST": [host_name]}, "operation_name_disp": {"LIST": [ope_name]}, "discard": {"LIST": ["0"]}}
                                 status_code, tmp_result, msg = objmenu.rest_filter(filter_parameter, mode)
                                 parameter = tmp_result[0]['parameter']
 
                                 # 項目なしは対象外
                                 if col_data['COL_GROUP_ID'] is None:
-                                    ina_vars_ass_list[idx] = {'TABLE_NAME': table_name,'OPERATION_ID': operation_id, 'MOVEMENT_ID': col_data['MOVEMENT_ID'], 'SYSTEM_ID': host_id, 'STATUS': 'skip'}
+                                    ina_vars_ass_list[idx] = {'TABLE_NAME': table_name, 'OPERATION_ID': operation_id, 'MOVEMENT_ID': col_data['MOVEMENT_ID'], 'SYSTEM_ID': host_id, 'STATUS': 'skip'}
                                     idx += 1
                                     continue
                                 else:
@@ -1587,7 +1589,7 @@ class SubValueAutoReg():
 
         return ina_vars_ass_list, ina_vars_ass_chk_list, ina_array_vars_ass_list, ina_array_vars_ass_chk_list
 
-    def readValAssign(self, movement_id, WS_DB):
+    def read_val_assign(self, WS_DB, movement_id = None):
         """
         代入値自動登録設定からカラム情報を取得する。
 
@@ -1797,12 +1799,16 @@ class SubValueAutoReg():
         sql += "          (TBL_A.MVMT_VAR_LINK_ID    = TBL_E.MVMT_VAR_LINK_ID)    \n"
         sql += " WHERE                                                            \n"
         sql += "   TBL_A.DISUSE_FLAG='0'                                          \n"
-        sql += "   AND TBL_A.MOVEMENT_ID = %s                                     \n"
+        if movement_id is not None:
+            sql += "   AND TBL_A.MOVEMENT_ID = %s                                     \n"
         sql += "   AND TBL_C.DISUSE_FLAG='0'                                      \n"
         sql += "   AND TBL_B.AUTOREG_HIDE_ITEM = '0'                              \n"
         sql += " ORDER BY TBL_A.COLUMN_ID                                         \n"
 
-        data_list = WS_DB.sql_execute(sql, [movement_id])
+        if movement_id is not None:
+            data_list = WS_DB.sql_execute(sql, [movement_id])
+        else:
+            data_list = WS_DB.sql_execute(sql)
 
         inout_tableNameToMenuIdList = {}
         inout_tabColNameToValAssRowList = {}
